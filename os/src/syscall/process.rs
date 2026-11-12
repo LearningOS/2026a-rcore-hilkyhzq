@@ -174,6 +174,7 @@ pub fn sys_spawn(path: *const u8) -> isize {
         return -1;
     };
     let data = file.read_all();
+    if !crate::mm::elf_can_load(&data) { return -1; }
     let parent = current_task().unwrap();
     let child = Arc::new(crate::task::TaskControlBlock::new(&data));
     let pid = child.getpid();

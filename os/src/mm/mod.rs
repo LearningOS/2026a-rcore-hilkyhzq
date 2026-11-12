@@ -31,3 +31,6 @@ pub fn init() {
 }
 
 pub use page_table::{checked_user_buffer, checked_user_string};
+
+mod elf_validate;
+pub use elf_validate::elf_can_load;
