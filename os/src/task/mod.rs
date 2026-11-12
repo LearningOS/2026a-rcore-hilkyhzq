@@ -51,10 +51,11 @@ lazy_static! {
     /// Global variable: TASK_MANAGER
     pub static ref TASK_MANAGER: TaskManager = {
         let num_app = get_num_app();
-        let mut tasks = [TaskControlBlock {
+        let mut tasks = core::array::from_fn(|_| TaskControlBlock {
             task_cx: TaskContext::zero_init(),
             task_status: TaskStatus::UnInit,
-        }; MAX_APP_NUM];
+            syscall_counts: alloc::collections::BTreeMap::new(),
+        });
         for (i, task) in tasks.iter_mut().enumerate() {
             task.task_cx = TaskContext::goto_restore(init_app_cx(i));
             task.task_status = TaskStatus::Ready;
@@ -168,4 +169,22 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Record a syscall before dispatch, including trace and non-returning exit calls.
+pub fn count_current_syscall(id: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current = inner.current_task;
+    let count = inner.tasks[current].syscall_counts.entry(id).or_insert(0);
+    *count = count.saturating_add(1);
+}
+
+/// Read only the running task's count; an uncalled syscall has count zero.
+pub fn current_syscall_count(id: usize) -> usize {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    inner.tasks[inner.current_task]
+        .syscall_counts
+        .get(&id)
+        .copied()
+        .unwrap_or(0)
 }

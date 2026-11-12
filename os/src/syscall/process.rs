@@ -38,8 +38,19 @@ pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
-// TODO: implement the syscall
-pub fn sys_trace(_trace_request: usize, _id: usize, _data: usize) -> isize {
+/// Read/write one byte, or query this task's syscall count.
+/// Chapter 3 uses direct addresses; permission-checked translation comes in ch4.
+pub fn sys_trace(trace_request: usize, id: usize, data: usize) -> isize {
     trace!("kernel: sys_trace");
-    -1
+    match trace_request {
+        0 => unsafe { (id as *const u8).read_volatile() as isize },
+        1 => {
+            unsafe {
+                (id as *mut u8).write_volatile(data as u8);
+            }
+            0
+        }
+        2 => crate::task::current_syscall_count(id) as isize,
+        _ => -1,
+    }
 }
