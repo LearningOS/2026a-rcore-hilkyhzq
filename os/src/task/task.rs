@@ -28,6 +28,8 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+    /// Syscall counts owned by this task.
+    pub syscall_counts: alloc::collections::BTreeMap<usize, usize>,
 }
 
 impl TaskControlBlock {
@@ -63,6 +65,7 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            syscall_counts: alloc::collections::BTreeMap::new(),
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();
@@ -78,19 +81,12 @@ impl TaskControlBlock {
     /// change the location of the program break. return None if failed.
     pub fn change_program_brk(&mut self, size: i32) -> Option<usize> {
         let old_break = self.program_brk;
-        let new_brk = self.program_brk as isize + size as isize;
-        if new_brk < self.heap_bottom as isize {
+        let new_break = old_break.checked_add_signed(size as isize)?;
+        if new_break < self.heap_bottom {
             return None;
         }
-        let result = if size < 0 {
-            self.memory_set
-                .shrink_to(VirtAddr(self.heap_bottom), VirtAddr(new_brk as usize))
-        } else {
-            self.memory_set
-                .append_to(VirtAddr(self.heap_bottom), VirtAddr(new_brk as usize))
-        };
-        if result {
-            self.program_brk = new_brk as usize;
+        if self.memory_set.resize_user_heap(old_break, new_break) {
+            self.program_brk = new_break;
             Some(old_break)
         } else {
             None

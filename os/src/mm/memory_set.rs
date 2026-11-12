@@ -410,3 +410,127 @@ pub fn remap_test() {
         .executable(),);
     println!("remap_test passed!");
 }
+
+impl MemorySet {
+    /// Map a previously unmapped, aligned user range with R/W/X bits 0..2.
+    pub fn map_user_range(&mut self, start: usize, len: usize, prot: usize) -> isize {
+        if start % PAGE_SIZE != 0 || prot == 0 || prot & !7 != 0 {
+            return -1;
+        }
+        let Some(end) = start.checked_add(len) else {
+            return -1;
+        };
+        if start >= (1usize << 38) || end > (1usize << 38) {
+            return -1;
+        }
+        if len == 0 {
+            return 0;
+        }
+        let first = VirtAddr::from(start).floor();
+        let last = VirtAddr::from(end).ceil();
+        for vpn in VPNRange::new(first, last) {
+            if self.translate(vpn).map_or(false, |pte| pte.is_valid()) {
+                return -1;
+            }
+        }
+        let permission =
+            MapPermission::from_bits(((prot as u8) << 1) | MapPermission::U.bits()).unwrap();
+        let mut area = MapArea::new(start.into(), end.into(), MapType::Framed, permission);
+        // Acquire all data pages before changing any leaf mappings.
+        for vpn in area.vpn_range {
+            let Some(frame) = frame_alloc() else {
+                return -1;
+            };
+            area.data_frames.insert(vpn, frame);
+        }
+        let flags = PTEFlags::from_bits(permission.bits()).unwrap();
+        for (vpn, frame) in &area.data_frames {
+            self.page_table.map(*vpn, frame.ppn, flags);
+        }
+        self.areas.push(area);
+        unsafe {
+            asm!("sfence.vma");
+        }
+        0
+    }
+
+    /// Unmap only fully present user pages; failed validation leaves mappings intact.
+    pub fn unmap_user_range(&mut self, start: usize, len: usize) -> isize {
+        if start % PAGE_SIZE != 0 {
+            return -1;
+        }
+        let Some(end) = start.checked_add(len) else {
+            return -1;
+        };
+        if start >= (1usize << 38) || end > (1usize << 38) {
+            return -1;
+        }
+        if len == 0 {
+            return 0;
+        }
+        let first = VirtAddr::from(start).floor();
+        let last = VirtAddr::from(end).ceil();
+        for vpn in VPNRange::new(first, last) {
+            match self.translate(vpn) {
+                Some(pte) if pte.is_valid() && pte.flags().contains(PTEFlags::U) => {}
+                _ => return -1,
+            }
+        }
+        self.unmap_present_user_pages(first, last);
+        0
+    }
+
+    /// Resize a heap that may contain holes created by munmap.
+    pub fn resize_user_heap(&mut self, old_break: usize, new_break: usize) -> bool {
+        if old_break >= (1usize << 38) || new_break >= (1usize << 38) {
+            return false;
+        }
+        let old_end = VirtAddr::from(old_break).ceil();
+        let new_end = VirtAddr::from(new_break).ceil();
+        if new_end > old_end {
+            self.map_user_range(
+                old_end.0 * PAGE_SIZE,
+                (new_end.0 - old_end.0) * PAGE_SIZE,
+                3,
+            ) == 0
+        } else {
+            self.unmap_present_user_pages(new_end, old_end);
+            true
+        }
+    }
+
+    fn unmap_present_user_pages(&mut self, first: VirtPageNum, last: VirtPageNum) {
+        // Split area descriptors too, so later fork cannot resurrect unmapped pages.
+        for mut area in core::mem::take(&mut self.areas) {
+            let old_start = area.vpn_range.get_start();
+            let old_end = area.vpn_range.get_end();
+            if old_start == old_end || old_end <= first || old_start >= last {
+                self.areas.push(area);
+                continue;
+            }
+            let cut_start = old_start.max(first);
+            let cut_end = old_end.min(last);
+            for vpn in VPNRange::new(cut_start, cut_end) {
+                area.unmap_one(&mut self.page_table, vpn);
+            }
+            let right_frames = area.data_frames.split_off(&cut_end);
+            let permission = area.map_perm;
+            let map_type = area.map_type;
+            if old_start < cut_start {
+                area.vpn_range = VPNRange::new(old_start, cut_start);
+                self.areas.push(area);
+            }
+            if cut_end < old_end {
+                self.areas.push(MapArea {
+                    vpn_range: VPNRange::new(cut_end, old_end),
+                    data_frames: right_frames,
+                    map_type,
+                    map_perm: permission,
+                });
+            }
+        }
+        unsafe {
+            asm!("sfence.vma");
+        }
+    }
+}
