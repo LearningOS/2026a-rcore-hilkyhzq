@@ -26,7 +26,7 @@ use crate::timer::remove_timer;
 use alloc::{sync::Arc, vec::Vec};
 use lazy_static::*;
 use manager::fetch_task;
-use process::ProcessControlBlock;
+pub use process::ProcessControlBlock;
 use switch::__switch;
 
 pub use context::TaskContext;
@@ -80,6 +80,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let process = task.process.upgrade().unwrap();
+    process
+        .inner_exclusive_access()
+        .deadlock
+        .retire(task.deadlock_id);
     let tid = task_inner.res.as_ref().unwrap().tid;
     // record exit code
     task_inner.exit_code = Some(exit_code);

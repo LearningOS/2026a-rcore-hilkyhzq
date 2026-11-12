@@ -19,6 +19,10 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     );
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
+    let scheduling = {
+        let inner = task.inner_exclusive_access();
+        (inner.priority, inner.pass)
+    };
     // create a new thread
     let new_task = Arc::new(TaskControlBlock::new(
         Arc::clone(&process),
@@ -29,6 +33,11 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
             .ustack_base,
         true,
     ));
+    {
+        let mut inner = new_task.inner_exclusive_access();
+        inner.priority = scheduling.0;
+        inner.pass = scheduling.1;
+    }
     // add new task to scheduler
     add_task(Arc::clone(&new_task));
     let new_task_inner = new_task.inner_exclusive_access();

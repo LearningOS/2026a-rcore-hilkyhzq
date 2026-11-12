@@ -13,6 +13,8 @@ pub struct TaskControlBlock {
     pub process: Weak<ProcessControlBlock>,
     /// Kernel stack corresponding to PID
     pub kstack: KernelStack,
+    /// Unique accounting actor, independent of recyclable user thread IDs.
+    pub deadlock_id: usize,
     /// mutable
     inner: UPSafeCell<TaskControlBlockInner>,
 }
@@ -41,6 +43,10 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     /// It is set when active exit or execution error occurs
     pub exit_code: Option<i32>,
+    /// Relative stride scheduling weight.
+    pub priority: usize,
+    /// Accumulated stride scheduling service.
+    pub pass: u128,
 }
 
 impl TaskControlBlockInner {
@@ -68,6 +74,7 @@ impl TaskControlBlock {
         Self {
             process: Arc::downgrade(&process),
             kstack,
+            deadlock_id: NEXT_DEADLOCK_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
             inner: unsafe {
                 UPSafeCell::new(TaskControlBlockInner {
                     res: Some(res),
@@ -75,6 +82,8 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kstack_top),
                     task_status: TaskStatus::Ready,
                     exit_code: None,
+                    priority: 16,
+                    pass: 0,
                 })
             },
         }
@@ -91,3 +100,5 @@ pub enum TaskStatus {
     /// blocked
     Blocked,
 }
+
+static NEXT_DEADLOCK_ID: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(1);

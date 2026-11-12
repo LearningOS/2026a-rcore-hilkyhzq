@@ -46,12 +46,22 @@ pub fn sys_fork() -> isize {
         "kernel:pid[{}] sys_fork",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
+    let scheduling = {
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
+        (inner.priority, inner.pass)
+    };
     let current_process = current_process();
     let new_process = current_process.fork();
     let new_pid = new_process.getpid();
     // modify trap context of new_task, because it returns immediately after switching
     let new_process_inner = new_process.inner_exclusive_access();
     let task = new_process_inner.tasks[0].as_ref().unwrap();
+    {
+        let mut inner = task.inner_exclusive_access();
+        inner.priority = scheduling.0;
+        inner.pass = scheduling.1;
+    }
     let trap_cx = task.inner_exclusive_access().get_trap_cx();
     // we do not have to move to next instruction since we have done it before
     // for child process, fork returns 0
@@ -151,34 +161,57 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    let us = crate::timer::get_time_us();
+    let time = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    let Some(buffers) = crate::mm::checked_user_buffer(
+        crate::task::current_user_token(),
+        ts as usize,
+        core::mem::size_of::<TimeVal>(),
+        true,
+    ) else {
+        return -1;
+    };
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &time as *const TimeVal as *const u8,
+            core::mem::size_of::<TimeVal>(),
+        )
+    };
+    let mut offset = 0;
+    for buffer in buffers {
+        let count = buffer.len();
+        buffer.copy_from_slice(&bytes[offset..offset + count]);
+        offset += count;
+    }
+    0
 }
 
 /// mmap syscall
 ///
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
+    let process = current_process();
+    let result = process
+        .inner_exclusive_access()
+        .memory_set
+        .map_user_range(start, len, port);
+    result
 }
 
 /// munmap syscall
 ///
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    let process = current_process();
+    let result = process
+        .inner_exclusive_access()
+        .memory_set
+        .unmap_user_range(start, len);
+    result
 }
 
 /// change data segment size
@@ -193,21 +226,46 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
 /// spawn syscall
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+pub fn sys_spawn(path: *const u8) -> isize {
+    let Some(path) = crate::mm::checked_user_string(current_user_token(), path as usize) else {
+        return -1;
+    };
+    let Some(file) = open_file(&path, OpenFlags::RDONLY) else {
+        return -1;
+    };
+    let data = file.read_all();
+    if !crate::mm::elf_can_load(&data) { return -1; }
+    let scheduling = {
+        let task = current_task().unwrap();
+        let inner = task.inner_exclusive_access();
+        (inner.priority, inner.pass)
+    };
+    let parent = current_process();
+    let child = crate::task::ProcessControlBlock::new(&data);
+    let pid = child.getpid();
+    {
+        let mut parent_inner = parent.inner_exclusive_access();
+        let mut child_inner = child.inner_exclusive_access();
+        child_inner.parent = Some(Arc::downgrade(&parent));
+        child_inner.fd_table = parent_inner.fd_table.clone();
+        let mut main_inner = child_inner.tasks[0]
+            .as_ref()
+            .unwrap()
+            .inner_exclusive_access();
+        main_inner.priority = scheduling.0;
+        main_inner.pass = scheduling.1;
+        parent_inner.children.push(Arc::clone(&child));
+    }
+    pid as isize
 }
 
 /// set priority syscall
 ///
 /// YOUR JOB: Set task priority
-pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
-        current_task().unwrap().process.upgrade().unwrap().getpid()
-    );
-    -1
+pub fn sys_set_priority(prio: isize) -> isize {
+    if prio < 2 {
+        return -1;
+    }
+    current_task().unwrap().inner_exclusive_access().priority = prio as usize;
+    prio
 }

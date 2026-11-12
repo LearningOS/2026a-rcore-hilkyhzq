@@ -46,3 +46,14 @@ impl Condvar {
         mutex.lock();
     }
 }
+
+impl Condvar {
+    /// Enqueue and block after the syscall has accounted for releasing its mutex.
+    pub fn wait_unlocked(&self) {
+        self.inner
+            .exclusive_access()
+            .wait_queue
+            .push_back(current_task().unwrap());
+        block_current_and_run_next();
+    }
+}

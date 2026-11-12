@@ -1,4 +1,10 @@
-use super::File;
+//! `Arc<Inode>` -> `OSInodeInner`: In order to open files concurrently
+//! we need to wrap `Inode` into `Arc`,but `Mutex` in `Inode` prevents
+//! file systems from being accessed simultaneously
+//!
+//! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
+//! need to wrap `OSInodeInner` into `UPSafeCell`
+use super::{File, Stat, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -9,12 +15,14 @@ use easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
 
 /// inode in memory
+/// A wrapper around a filesystem inode
+/// to implement File trait atop
 pub struct OSInode {
     readable: bool,
     writable: bool,
     inner: UPSafeCell<OSInodeInner>,
 }
-/// inner of inode in memory
+/// The OS inode inner in 'UPSafeCell'
 pub struct OSInodeInner {
     offset: usize,
     inode: Arc<Inode>,
@@ -23,16 +31,16 @@ pub struct OSInodeInner {
 impl OSInode {
     /// create a new inode in memory
     pub fn new(readable: bool, writable: bool, inode: Arc<Inode>) -> Self {
-        trace!("kernel: OSInode::new");
+        let id = inode.inode_id();
+        *OPEN_INODES.exclusive_access().entry(id).or_insert(0) += 1;
         Self {
             readable,
             writable,
             inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
         }
     }
-    /// read all data from the inode in memory
+    /// read all data from the inode
     pub fn read_all(&self) -> Vec<u8> {
-        trace!("kernel: OSInode::read_all");
         let mut inner = self.inner.exclusive_access();
         let mut buffer: Vec<u8> = Vec::with_capacity(512);
         buffer.resize(512, 0);
@@ -97,7 +105,6 @@ impl OpenFlags {
 
 /// Open a file
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
-    trace!("kernel: open_file: name = {}, flags = {:?}", name, flags);
     let (readable, writable) = flags.read_write();
     if flags.contains(OpenFlags::CREATE) {
         if let Some(inode) = ROOT_INODE.find(name) {
@@ -121,17 +128,23 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
 }
 
 impl File for OSInode {
-    /// file readable?
+    fn stat(&self) -> Option<Stat> {
+        let id = self.inner.exclusive_access().inode.inode_id();
+        Some(Stat {
+            dev: 0,
+            ino: id as u64,
+            mode: StatMode::FILE,
+            nlink: ROOT_INODE.link_count(id),
+            pad: [0; 7],
+        })
+    }
     fn readable(&self) -> bool {
         self.readable
     }
-    /// file writable?
     fn writable(&self) -> bool {
         self.writable
     }
-    /// read file data into buffer
     fn read(&self, mut buf: UserBuffer) -> usize {
-        trace!("kernel: OSInode::read");
         let mut inner = self.inner.exclusive_access();
         let mut total_read_size = 0usize;
         for slice in buf.buffers.iter_mut() {
@@ -144,9 +157,7 @@ impl File for OSInode {
         }
         total_read_size
     }
-    /// write buffer data into file
     fn write(&self, buf: UserBuffer) -> usize {
-        trace!("kernel: OSInode::write");
         let mut inner = self.inner.exclusive_access();
         let mut total_write_size = 0usize;
         for slice in buf.buffers.iter() {
@@ -157,4 +168,50 @@ impl File for OSInode {
         }
         total_write_size
     }
+}
+
+lazy_static! {
+    // Count open descriptions, not descriptor-table references to one description.
+    static ref OPEN_INODES: UPSafeCell<alloc::collections::BTreeMap<u32, usize>> =
+        unsafe { UPSafeCell::new(alloc::collections::BTreeMap::new()) };
+}
+
+impl Drop for OSInode {
+    fn drop(&mut self) {
+        let inode = Arc::clone(&self.inner.exclusive_access().inode);
+        let id = inode.inode_id();
+        let mut counts = OPEN_INODES.exclusive_access();
+        let count = counts.get_mut(&id).expect("open inode count missing");
+        *count -= 1;
+        let last = *count == 0;
+        if last {
+            counts.remove(&id);
+        }
+        drop(counts);
+        if last && ROOT_INODE.link_count(id) == 0 {
+            inode.reclaim_unlinked();
+        }
+    }
+}
+
+/// Add a hard link to a regular file in the root directory.
+pub fn link_file(old: &str, new: &str) -> bool {
+    ROOT_INODE.link(old, new)
+}
+
+/// Remove a name and reclaim only when no open description still uses the inode.
+pub fn unlink_file(name: &str) -> bool {
+    let Some(inode) = ROOT_INODE.unlink(name) else {
+        return false;
+    };
+    let id = inode.inode_id();
+    let count = OPEN_INODES
+        .exclusive_access()
+        .get(&id)
+        .copied()
+        .unwrap_or(0);
+    if count == 0 && ROOT_INODE.link_count(id) == 0 {
+        inode.reclaim_unlinked();
+    }
+    true
 }
