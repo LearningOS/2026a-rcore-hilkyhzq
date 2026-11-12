@@ -68,6 +68,10 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+    /// Relative CPU share, at least two.
+    pub priority: usize,
+    /// Accumulated stride scheduling service.
+    pub pass: u128,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +122,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,
+                    pass: 0,
                 })
             },
         };
@@ -150,6 +156,8 @@ impl TaskControlBlock {
         inner.trap_cx_ppn = trap_cx_ppn;
         // initialize base_size
         inner.base_size = user_sp;
+        inner.heap_bottom = user_sp;
+        inner.program_brk = user_sp;
         // initialize trap_cx
         let trap_cx = inner.get_trap_cx();
         *trap_cx = TrapContext::app_init_context(
@@ -191,6 +199,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    pass: parent_inner.pass,
                 })
             },
         });
@@ -214,23 +224,13 @@ impl TaskControlBlock {
     /// change the location of the program break. return None if failed.
     pub fn change_program_brk(&self, size: i32) -> Option<usize> {
         let mut inner = self.inner_exclusive_access();
-        let heap_bottom = inner.heap_bottom;
         let old_break = inner.program_brk;
-        let new_brk = inner.program_brk as isize + size as isize;
-        if new_brk < heap_bottom as isize {
+        let new_break = old_break.checked_add_signed(size as isize)?;
+        if new_break < inner.heap_bottom {
             return None;
         }
-        let result = if size < 0 {
-            inner
-                .memory_set
-                .shrink_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
-        } else {
-            inner
-                .memory_set
-                .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
-        };
-        if result {
-            inner.program_brk = new_brk as usize;
+        if inner.memory_set.resize_user_heap(old_break, new_break) {
+            inner.program_brk = new_break;
             Some(old_break)
         } else {
             None

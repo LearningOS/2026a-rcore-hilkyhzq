@@ -213,3 +213,48 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .unwrap()
         .get_mut()
 }
+
+/// Validate a complete lower-half user range and translate it page by page.
+/// `write` requests writable memory; otherwise the pages must be readable.
+pub fn checked_user_buffer(
+    token: usize,
+    ptr: usize,
+    len: usize,
+    write: bool,
+) -> Option<Vec<&'static mut [u8]>> {
+    let end = ptr.checked_add(len)?;
+    if ptr >= (1usize << 38) || end > (1usize << 38) {
+        return None;
+    }
+    let table = PageTable::from_token(token);
+    let required = PTEFlags::V | PTEFlags::U | if write { PTEFlags::W } else { PTEFlags::R };
+    let mut result = Vec::new();
+    let mut current = ptr;
+    while current < end {
+        let va = VirtAddr::from(current);
+        let pte = table.translate(va.floor())?;
+        if !pte.flags().contains(required) || (pte.writable() && !pte.readable()) {
+            return None;
+        }
+        let offset = va.page_offset();
+        let count = (4096 - offset).min(end - current);
+        result.push(&mut pte.ppn().get_bytes_array()[offset..offset + count]);
+        current += count;
+    }
+    Some(result)
+}
+
+/// Read a bounded NUL-terminated UTF-8 user path without unchecked dereferences.
+pub fn checked_user_string(token: usize, ptr: usize) -> Option<alloc::string::String> {
+    let mut bytes = Vec::new();
+    for offset in 0..4096 {
+        let address = ptr.checked_add(offset)?;
+        let parts = checked_user_buffer(token, address, 1, false)?;
+        let byte = parts[0][0];
+        if byte == 0 {
+            return alloc::string::String::from_utf8(bytes).ok();
+        }
+        bytes.push(byte);
+    }
+    None
+}
