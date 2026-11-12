@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "courseId": 2073,
+  "repository": "LearningOS/2026a-rcore-hilkyhzq",
+  "user": "hilkyhzq",
+  "totalScore": 500,
+  "chapters": {
+    "ch4": {
+      "points": "16/16",
+      "score": 100,
+      "commit": "ab3e2256b54e15e0985f99f5ffcabe7d4ff9ec18"
+    }
+  },
+  "score": 100,
+  "upload": {
+    "status": "pending",
+    "runId": "43183606874",
+    "runAttempt": "1"
+  }
+}
