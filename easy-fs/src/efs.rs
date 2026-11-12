@@ -149,3 +149,11 @@ impl EasyFileSystem {
         )
     }
 }
+
+impl EasyFileSystem {
+    /// Inverse of get_disk_inode_pos for a valid inode location.
+    pub fn get_disk_inode_id(&self, block: u32, offset: usize) -> u32 {
+        let size = core::mem::size_of::<DiskInode>();
+        (block - self.inode_area_start_block) * (BLOCK_SZ / size) as u32 + (offset / size) as u32
+    }
+}

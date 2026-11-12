@@ -4,7 +4,7 @@
 //!
 //! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
 //! need to wrap `OSInodeInner` into `UPSafeCell`
-use super::File;
+use super::{File, Stat, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -31,6 +31,8 @@ pub struct OSInodeInner {
 impl OSInode {
     /// create a new inode in memory
     pub fn new(readable: bool, writable: bool, inode: Arc<Inode>) -> Self {
+        let id = inode.inode_id();
+        *OPEN_INODES.exclusive_access().entry(id).or_insert(0) += 1;
         Self {
             readable,
             writable,
@@ -126,6 +128,16 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
 }
 
 impl File for OSInode {
+    fn stat(&self) -> Option<Stat> {
+        let id = self.inner.exclusive_access().inode.inode_id();
+        Some(Stat {
+            dev: 0,
+            ino: id as u64,
+            mode: StatMode::FILE,
+            nlink: ROOT_INODE.link_count(id),
+            pad: [0; 7],
+        })
+    }
     fn readable(&self) -> bool {
         self.readable
     }
@@ -156,4 +168,50 @@ impl File for OSInode {
         }
         total_write_size
     }
+}
+
+lazy_static! {
+    // Count open descriptions, not descriptor-table references to one description.
+    static ref OPEN_INODES: UPSafeCell<alloc::collections::BTreeMap<u32, usize>> =
+        unsafe { UPSafeCell::new(alloc::collections::BTreeMap::new()) };
+}
+
+impl Drop for OSInode {
+    fn drop(&mut self) {
+        let inode = Arc::clone(&self.inner.exclusive_access().inode);
+        let id = inode.inode_id();
+        let mut counts = OPEN_INODES.exclusive_access();
+        let count = counts.get_mut(&id).expect("open inode count missing");
+        *count -= 1;
+        let last = *count == 0;
+        if last {
+            counts.remove(&id);
+        }
+        drop(counts);
+        if last && ROOT_INODE.link_count(id) == 0 {
+            inode.reclaim_unlinked();
+        }
+    }
+}
+
+/// Add a hard link to a regular file in the root directory.
+pub fn link_file(old: &str, new: &str) -> bool {
+    ROOT_INODE.link(old, new)
+}
+
+/// Remove a name and reclaim only when no open description still uses the inode.
+pub fn unlink_file(name: &str) -> bool {
+    let Some(inode) = ROOT_INODE.unlink(name) else {
+        return false;
+    };
+    let id = inode.inode_id();
+    let count = OPEN_INODES
+        .exclusive_access()
+        .get(&id)
+        .copied()
+        .unwrap_or(0);
+    if count == 0 && ROOT_INODE.link_count(id) == 0 {
+        inode.reclaim_unlinked();
+    }
+    true
 }
